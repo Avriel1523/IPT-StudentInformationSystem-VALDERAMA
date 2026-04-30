@@ -1,19 +1,47 @@
 import express from 'express';
 import cors from 'cors';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import multer from 'multer';
+import connectDB from './config/database.js';
+import Student from './models/Student.js';
+import User from './models/User.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
- 
+
+// Connect to MongoDB
+connectDB();
+
 const app = express();
 const port = 5555;
+
 app.use(cors());
 app.use(express.json());
- 
+app.use(express.urlencoded({ extended: true }));
+app.use('/uploads', express.static('uploads'));
+
+// Configure multer for file uploads
+const upload = multer({
+  dest: 'uploads/',
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+    fieldSize: 1024 * 1024, // 1MB limit for form fields
+    fields: 10, // Maximum number of non-file fields
+    fieldNameSize: 100 // Maximum field name size
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  }
+});
+
 app.get("/", (req, res) => {
   res.send("Hello World!");
 });
+
  
 app.get('/user/:name', (req, res) => {
   const name = req.params.name;
@@ -40,245 +68,216 @@ app.get('/search', (req, res) => {
   res.send(`You searched for: ${query}`);
 });
  
-app.post('/addUser', (req, res) => {
-  const { name, email } = req.body;
+// User routes with MongoDB
+app.post('/add-user-db', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
 
-  if (!name || !email) {
-    return res.status(400).send('Name and email are required.');
+    // Validate input first
+    if (!name || !email) {
+      return res.status(400).send('Name and email are required.');
+    }
+
+    // Check if email already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).send('Email already exists.');
+    }
+
+    // Create new user
+    const newUser = new User({ name, email });
+    await newUser.save();
+    
+    res.status(201).json({ message: 'User added successfully!', user: newUser });
+  } catch (error) {
+    console.error('Error adding user:', error);
+    res.status(500).send('Error saving user data.');
   }
-
-  const filePath = path.join(__dirname, 'users.json');
-
-  fs.readFile(filePath, 'utf8', (err, data) => {
-    let users = [];
-    if (!err && data) {
-      try {
-        users = JSON.parse(data);
-      } catch {
-        return res.status(500).send('Error parsing user data.');
-      }
-    }
-
-    // assign a unique id to the new user
-    const newUser = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2),
-      name,
-      email,
-    };
-    users.push(newUser);
-
-    fs.writeFile(filePath, JSON.stringify(users, null, 2), (err) => {
-      if (err) {
-        return res.status(500).send('Error saving user data.');
-      }
-      res.send('User added successfully!');
-    });
-  });
 });
 
-// helper to read users file and ensure every record has an id
-function readUsers(callback) {
-  const filePath = path.join(__dirname, 'users.json');
-  fs.readFile(filePath, 'utf8', (err, data) => {
-    if (err) {
-      return callback(err);
-    }
-    let users;
-    try {
-      users = data ? JSON.parse(data) : [];
-    } catch {
-      return callback(new Error('Error parsing data'));
-    }
-
-    let modified = false;
-    users.forEach(u => {
-      if (!u.id) {
-        u.id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-        modified = true;
-      }
-    });
-
-    if (modified) {
-      fs.writeFile(filePath, JSON.stringify(users, null, 2), writeErr => {
-        if (writeErr) console.error('Failed to add ids to users.json', writeErr);
-        callback(null, users);
-      });
-    } else {
-      callback(null, users);
-    }
-  });
-}
-
-app.get('/users', (req, res) => {
-  readUsers((err, users) => {
-    if (err) {
-      return res.status(500).send('Error reading users data.');
-    }
+app.get('/users', async (req, res) => {
+  try {
+    const users = await User.find().sort({ createdAt: -1 });
     res.json(users);
-  });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).send('Error reading users data.');
+  }
 });
- 
-// **PUT route for updating a user by id or email**
-app.put('/edit-user/:identifier', (req, res) => {
-  const identifier = req.params.identifier;
-  const { name, newEmail } = req.body;
-  const filePath = path.join(__dirname, 'users.json');
 
-  // readUsers ensures ids exist and returns the user array
-  readUsers((err, users) => {
-    if (err) {
-      return res.status(500).send('Error reading users data.');
+app.put('/edit-user/:identifier', async (req, res) => {
+  try {
+    const identifier = req.params.identifier;
+    const { name, newEmail } = req.body;
+
+    // Find user by email or generate ObjectId from string id
+    let user;
+    if (identifier.includes('@')) {
+      user = await User.findOne({ email: identifier });
+    } else {
+      user = await User.findById(identifier);
     }
 
-    const idx = users.findIndex(u => u.id === identifier || u.email === identifier);
-    if (idx === -1) {
+    if (!user) {
       return res.status(404).send('User not found.');
     }
 
-    // assign id if it was missing
-    if (!users[idx].id) {
-      users[idx].id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-    }
-
-    if (name) users[idx].name = name;
+    if (name) user.name = name;
     if (newEmail) {
-      users[idx].email = newEmail;
+      // Check if new email already exists
+      const existingUser = await User.findOne({ email: newEmail, _id: { $ne: user._id } });
+      if (existingUser) {
+        return res.status(400).send('Email already exists.');
+      }
+      user.email = newEmail;
     }
 
-    fs.writeFile(filePath, JSON.stringify(users, null, 2), (writeErr) => {
-      if (writeErr) {
-        return res.status(500).send('Error saving user data.');
-      }
-      res.send('User updated successfully!');
-    });
-  });
+    await user.save();
+    res.json(user);
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).send('Error saving user data.');
+  }
 });
 
-// Delete student route
-app.delete('/students/:id', (req, res) => {
-  const { id } = req.params;
-
-  fs.readFile(studentsFilePath, 'utf8', (err, data) => {
-    if (err) {
-      return res.status(500).send('Error reading students data.');
-    }
-    let students;
-    try {
-      students = JSON.parse(data);
-    } catch {
-      return res.status(500).send('Error parsing students data.');
-    }
-
-    const newStudents = students.filter(student => student.id != id);
-    if (students.length === newStudents.length) {
+// Student routes with MongoDB
+app.delete('/students/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = parseInt(id);
+    
+    const result = await Student.findOneAndDelete({ id: studentId });
+    
+    if (!result) {
       return res.status(404).send('Student not found.');
     }
-
-    fs.writeFile(studentsFilePath, JSON.stringify(newStudents, null, 2), (err) => {
-      if (err) {
-        return res.status(500).send('Error deleting student.');
-      }
-      res.json({ message: 'Student deleted successfully!' });
-    });
-  });
+    
+    res.json({ message: 'Student deleted successfully!' });
+  } catch (error) {
+    console.error('Error deleting student:', error);
+    res.status(500).send('Error deleting student.');
+  }
 });
- 
-// Add student route
-const studentsFilePath = path.join(__dirname, 'students.json');
- 
-app.post('/students', (req, res) => {
-  const student = req.body;
- 
-  // Validate input
-  if (
-    !student.firstName ||
-    !student.lastName ||
-    !student.course ||
-    !student.year
-  ) {
-    return res.status(400).send('All student fields are required.');
-  }
 
-  // Generate id if not provided
-  if (!student.id) {
-    student.id = Date.now().toString(36) + Math.random().toString(36).slice(2);
-  }
- 
-  fs.readFile(studentsFilePath, 'utf8', (err, data) => {
-    let students = [];
-    if (!err && data) {
-      try {
-        students = JSON.parse(data);
-      } catch {
-        console.error('Error parsing students.json');
-        return res.status(500).send('Error parsing students data.');
-      }
+app.post('/students', upload.single('image'), async (req, res) => {
+  try {
+    console.log('POST /students - req.body:', req.body);
+    console.log('POST /students - req.file:', req.file);
+    
+    // Handle both JSON and FormData cases
+    let studentData;
+    
+    if (req.body && typeof req.body === 'object' && req.body.firstName !== undefined) {
+      // FormData case - extract from req.body
+      studentData = {
+        id: req.body.id ? parseInt(req.body.id) : Date.now(),
+        firstName: req.body.firstName,
+        middleName: req.body.middleName || '',
+        lastName: req.body.lastName,
+        course: req.body.course,
+        year: req.body.year,
+        image: req.file ? `/uploads/${req.file.filename}` : (req.body.existingImage || '')
+      };
+    } else if (req.body && typeof req.body === 'object') {
+      // JSON case
+      studentData = {
+        ...req.body,
+        image: req.file ? `/uploads/${req.file.filename}` : (req.body.image || '')
+      };
+    } else {
+      return res.status(400).send('Invalid request data format');
     }
  
-    students.push(student);
- 
-    fs.writeFile(studentsFilePath, JSON.stringify(students, null, 2), (err) => {
-      if (err) {
-        console.error('Error writing students.json:', err);
-        return res.status(500).send('Error saving students data.');
-      }
-      res.status(201).json({ message: 'Student added successfully!' });
-    });
-  });
-});
- 
-app.get('/students', (req, res) => {
-  fs.readFile(studentsFilePath, 'utf8', (err, data) => {
-    if (err) {
-      console.error('Error reading students.json:', err);
-      return res.status(500).send('Error reading students data.');
+    // Validate input
+    if (
+      !studentData.firstName ||
+      !studentData.lastName ||
+      !studentData.course ||
+      !studentData.year
+    ) {
+      return res.status(400).send('All student fields are required.');
     }
-    const students = JSON.parse(data);
+
+    // Check for duplicate ID
+    const existingStudent = await Student.findOne({ id: studentData.id });
+    if (existingStudent) {
+      return res.status(400).send('Student ID already exists.');
+    }
+
+    // Create new student
+    const newStudent = new Student(studentData);
+    await newStudent.save();
+    
+    res.status(201).json({ message: 'Student added successfully!', student: newStudent });
+  } catch (error) {
+    console.error('Error adding student:', error);
+    res.status(500).send('Error saving students data.');
+  }
+});
+
+app.get('/students', async (req, res) => {
+  try {
+    const students = await Student.find().sort({ createdAt: -1 });
     res.json(students);
-  });
+  } catch (error) {
+    console.error('Error fetching students:', error);
+    res.status(500).send('Error reading students data.');
+  }
 });
 
-app.put('/students/:id', (req, res) => {
-  const { id } = req.params;
-  const updatedStudent = req.body;
+app.put('/students/:id', upload.single('image'), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const studentId = parseInt(id);
 
-  // Validation
-  if (
-    !updatedStudent.firstName ||
-    !updatedStudent.lastName ||
-    !updatedStudent.course ||
-    !updatedStudent.year
-  ) {
-    return res.status(400).send('All student fields are required.');
-  }
+    // Handle both JSON and FormData
+    let updatedData;
 
-  // Read students data
-  fs.readFile(studentsFilePath, 'utf8', (err, data) => {
-    if (err) {
-      return res.status(500).send('Error reading students data.');
+    // Check if this is FormData (multer processes it differently)
+    if (req.file || (req.body && typeof req.body === 'object' && req.body.constructor === Object)) {
+      // FormData case - extract from req.body
+      updatedData = {
+        firstName: req.body.firstName,
+        middleName: req.body.middleName || '',
+        lastName: req.body.lastName,
+        course: req.body.course,
+        year: req.body.year,
+        image: req.file ? `/uploads/${req.file.filename}` : req.body.existingImage
+      };
+    } else {
+      // JSON case or direct object
+      updatedData = req.body;
+      if (req.file) {
+        updatedData.image = `/uploads/${req.file.filename}`;
+      }
     }
-    let students;
-    try {
-      students = JSON.parse(data);
-    } catch {
-      return res.status(500).send('Error parsing students data.');
+
+    // Validation
+    if (
+      !updatedData.firstName ||
+      !updatedData.lastName ||
+      !updatedData.course ||
+      !updatedData.year
+    ) {
+      return res.status(400).send('All student fields are required.');
     }
 
-    const studentIndex = students.findIndex(student => student.id == id);
-    if (studentIndex === -1) {
+    // Find and update student
+    const student = await Student.findOneAndUpdate(
+      { id: studentId },
+      updatedData,
+      { new: true, runValidators: true }
+    );
+
+    if (!student) {
       return res.status(404).send('Student not found.');
     }
 
-    // Update student data, preserve id
-    students[studentIndex] = { ...students[studentIndex], ...updatedStudent, id: students[studentIndex].id };
-
-    fs.writeFile(studentsFilePath, JSON.stringify(students, null, 2), (err) => {
-      if (err) {
-        return res.status(500).send('Error saving students data.');
-      }
-      res.json({ message: 'Student updated successfully!' });
-    });
-  });
+    res.json({ message: 'Student updated successfully!', student });
+  } catch (error) {
+    console.error('Error updating student:', error);
+    res.status(500).send('Error saving students data.');
+  }
 });
 
 app.listen(port, () => {

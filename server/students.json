@@ -1,18 +1,21 @@
 [
   {
-    "id": 36697202,
-    "firstName": "AVRIEL VINCE",
-    "middleName": "BACANI",
-    "lastName": "VALDERAMA",
-    "course": "BSIT",
-    "year": "4"
+    "id": 36697203,
+    "firstName": "BENEDICT",
+    "middleName": "LAPURGA",
+    "lastName": "SALES",
+    "course": "BSCS",
+    "year": "3",
+    "image": "/uploads/6adfbca1ac92e08b24ba10e45371c29f"
   },
   {
-    "id": 355987,
-    "firstName": "SEAN CODY",
-    "middleName": "EWAN",
-    "lastName": "MANLICLIC",
+    "id": 36786301,
+    "firstName": "BENEDICTO",
+    "middleName": "LAPURGA",
+    "lastName": "SALES",
     "course": "BSIT",
-    "year": "3"
+    "year": "2",
+    "image": "/uploads/71d989648a7c7d4a74e4764cf00415d9",
+    "existingImage": "/uploads/71d989648a7c7d4a74e4764cf00415d9"
   }
 ]
