@@ -69,13 +69,17 @@ app.get('/search', (req, res) => {
 });
  
 // User routes with MongoDB
-app.post('/add-user-db', async (req, res) => {
+app.post('/add-user-db', upload.single('image'), async (req, res) => {
   try {
     const { name, email, password } = req.body;
 
     // Validate input first
-    if (!name || !email) {
-      return res.status(400).send('Name and email are required.');
+    if (!name || !email || !password) {
+      return res.status(400).send('Name, email, and password are required.');
+    }
+
+    if (password.length < 6) {
+      return res.status(400).send('Password must be at least 6 characters long.');
     }
 
     // Check if email already exists
@@ -84,11 +88,21 @@ app.post('/add-user-db', async (req, res) => {
       return res.status(400).send('Email already exists.');
     }
 
-    // Create new user
-    const newUser = new User({ name, email });
+    // Create new user with image and password
+    const userData = {
+      name,
+      email,
+      password, // Will be hashed by pre-save hook
+      image: req.file ? `/uploads/${req.file.filename}` : ''
+    };
+
+    const newUser = new User(userData);
     await newUser.save();
     
-    res.status(201).json({ message: 'User added successfully!', user: newUser });
+    // Don't send password back to client
+    const { password: _, ...userWithoutPassword } = newUser.toObject();
+    
+    res.status(201).json({ message: 'User added successfully!', user: userWithoutPassword });
   } catch (error) {
     console.error('Error adding user:', error);
     res.status(500).send('Error saving user data.');
@@ -97,7 +111,7 @@ app.post('/add-user-db', async (req, res) => {
 
 app.get('/users', async (req, res) => {
   try {
-    const users = await User.find().sort({ createdAt: -1 });
+    const users = await User.find().sort({ createdAt: -1 }).select('-password');
     res.json(users);
   } catch (error) {
     console.error('Error fetching users:', error);
@@ -105,10 +119,136 @@ app.get('/users', async (req, res) => {
   }
 });
 
-app.put('/edit-user/:identifier', async (req, res) => {
+// Login route
+app.post('/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Validate input
+    if (!email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email and password are required.' 
+      });
+    }
+
+    // Find user by email
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found.' 
+      });
+    }
+
+    // Compare password
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Invalid password.' 
+      });
+    }
+
+    // Generate a simple token (in production, use JWT)
+    const token = Buffer.from(`${user.email}:${Date.now()}`).toString('base64');
+
+    // Remove password from response
+    const { password: _, ...userWithoutPassword } = user.toObject();
+
+    res.json({
+      success: true,
+      message: 'Login successful!',
+      user: userWithoutPassword,
+      token: token
+    });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during login.' 
+    });
+  }
+});
+
+// Registration route
+app.post('/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    // Validate input
+    if (!name || !email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Name, email, and password are required.' 
+      });
+    }
+
+    // Validate name format
+    if (!/^[a-zA-Z\s]+$/.test(name)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Name must contain only alphabets and spaces.' 
+      });
+    }
+
+    // Validate email format
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Please enter a valid email address.' 
+      });
+    }
+
+    // Validate password length
+    if (password.length < 6) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Password must be at least 6 characters long.' 
+      });
+    }
+
+    // Check if email already exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email already exists.' 
+      });
+    }
+
+    // Create new user
+    const newUser = new User({
+      name,
+      email,
+      password
+    });
+
+    await newUser.save();
+
+    // Remove password from response
+    const { password: _, ...userWithoutPassword } = newUser.toObject();
+
+    res.status(201).json({
+      success: true,
+      message: 'Registration successful!',
+      user: userWithoutPassword
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Server error during registration.' 
+    });
+  }
+});
+
+app.put('/edit-user/:identifier', upload.single('image'), async (req, res) => {
   try {
     const identifier = req.params.identifier;
-    const { name, newEmail } = req.body;
+    const { name, newEmail, password } = req.body;
 
     // Find user by email or generate ObjectId from string id
     let user;
@@ -132,11 +272,145 @@ app.put('/edit-user/:identifier', async (req, res) => {
       user.email = newEmail;
     }
 
+    // Update password if provided
+    if (password && password.length >= 6) {
+      user.password = password; // Will be hashed by pre-save hook
+    }
+
+    // Update image if new one is uploaded
+    if (req.file) {
+      user.image = `/uploads/${req.file.filename}`;
+    }
+
     await user.save();
-    res.json(user);
+    
+    // Don't send password back to client
+    const { password: _, ...userWithoutPassword } = user.toObject();
+    
+    res.json(userWithoutPassword);
   } catch (error) {
     console.error('Error updating user:', error);
     res.status(500).send('Error saving user data.');
+  }
+});
+
+// Alternative edit route for emails using query parameter
+app.put('/edit-user', upload.single('image'), async (req, res) => {
+  try {
+    const email = req.query.email;
+    const { name, newEmail, password } = req.body;
+
+    if (!email) {
+      return res.status(400).send('Email parameter is required.');
+    }
+
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).send('User not found.');
+    }
+
+    if (name) user.name = name;
+    if (newEmail) {
+      // Check if new email already exists
+      const existingUser = await User.findOne({ email: newEmail, _id: { $ne: user._id } });
+      if (existingUser) {
+        return res.status(400).send('Email already exists.');
+      }
+      user.email = newEmail;
+    }
+
+    // Update password if provided
+    if (password && password.length >= 6) {
+      user.password = password; // Will be hashed by pre-save hook
+    }
+
+    // Update image if new one is uploaded
+    if (req.file) {
+      user.image = `/uploads/${req.file.filename}`;
+    }
+
+    await user.save();
+    
+    // Don't send password back to client
+    const { password: _, ...userWithoutPassword } = user.toObject();
+    
+    res.json(userWithoutPassword);
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).send('Error saving user data.');
+  }
+});
+
+app.delete('/users/:identifier', async (req, res) => {
+  try {
+    const identifier = req.params.identifier;
+    console.log('Delete request for identifier:', identifier);
+    console.log('Identifier type:', typeof identifier);
+    
+    // Find user by email or generate ObjectId from string id
+    let user;
+    if (identifier.includes('@')) {
+      user = await User.findOneAndDelete({ email: identifier });
+      console.log('Deleted by email, result:', user);
+    } else {
+      user = await User.findByIdAndDelete(identifier);
+      console.log('Deleted by ID, result:', user);
+    }
+    
+    if (!user) {
+      console.log('User not found for identifier:', identifier);
+      return res.status(404).send('User not found.');
+    }
+    
+    res.json({ message: 'User deleted successfully!' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).send('Error deleting user.');
+  }
+});
+
+// Simple delete route using MongoDB _id only
+app.delete('/users/delete/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    console.log('Simple delete request for ID:', id);
+    
+    const user = await User.findByIdAndDelete(id);
+    console.log('Delete result:', user);
+    
+    if (!user) {
+      console.log('User not found for ID:', id);
+      return res.status(404).send('User not found.');
+    }
+    
+    res.json({ message: 'User deleted successfully!' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).send('Error deleting user.');
+  }
+});
+
+// Alternative delete route for emails using query parameter
+app.delete('/users/by-email', async (req, res) => {
+  try {
+    const email = req.query.email;
+    console.log('Delete request for email:', email);
+    
+    if (!email) {
+      return res.status(400).send('Email parameter is required.');
+    }
+    
+    const user = await User.findOneAndDelete({ email });
+    
+    if (!user) {
+      return res.status(404).send('User not found.');
+    }
+    
+    res.json({ message: 'User deleted successfully!' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).send('Error deleting user.');
   }
 });
 

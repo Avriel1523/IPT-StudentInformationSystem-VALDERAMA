@@ -10,6 +10,7 @@ function Sidebar() {
         <li><Link to="/add-student">Students</Link></li>
         <li><Link to="/car">Car</Link></li>
         <li><Link to="/users">Users</Link></li>
+        <li><Link to="/login">Login</Link></li>
       </ul>
     </div>
   );
